@@ -1,0 +1,22 @@
+作 者:     伊藤　敬彦
+
+開発 環境: Python
+
+確認済み動作環境: Linux (Ubuntu	9.04)
+
+
+前提(prerequisite)となるソフトウェア: python make 
+
+インストールの手順: 
+zip file python_lda.zip を解凍し、出現したディレクトリpython 内で 'make learn' を実行する。
+	%unzip python_lda.zip
+	%cd python 
+	%make learn
+
+ツールの使い方:
+	python lda は make を利用して簡単に実行できる。実行可能なコマンドには以下のものがある。
+
+	make learn  -- LDA (Latent Dirichlet Allocation) の学習を行う(make infer, oinfer, recommend コマンドは make learn を実行後のみ動作する。)
+	make infer  -- LDA 'make learn' によって生成されたモデルを利用して新しいユーザにトピックを付与する
+	make oinfer -- learn で使用した購買履歴に出現するユーザの新しく追加された、購買履歴を利用してユーザのトピックを更新する
+	make recommend -- ユーザにアイテムを推薦する。内部では 'make oinfer'　出使用した online LDA　が動作する。

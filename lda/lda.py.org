@@ -1,0 +1,418 @@
+#
+# LDA (Latent Dirichret Allocation) 
+#
+import sys
+import getopt
+import random
+
+#
+# ==TODO==
+# - change the input file format
+# - change the input format
+# 
+
+class LDAResourcePool:
+    def __init__(self):
+        self.examples      = []  # list of Example objects
+        self.word_topics   = []  # topic assignments for each word (word_topics[m][n] = topic).  ==z==
+        self.nword_topics  = []  # number of instances of word i (term?) assigned to topic k. ==nw==
+        self.nd_topics     = []  # number of words in document i assigned to topic j. ==nd==
+        self.nw_sum        = []  # total number of words assigned to topic j.
+        self.nd_sum        = []  # total number of words in document i.
+        self.num_of_words  = 0   # vocabulary size
+        self.num_of_docs   = 0   # number of input examples
+
+class LDA:
+    def __init__(self):
+        self.alpha         = 0    # Dirichlet parameter (document--topic associations)       
+        self.beta          = 0.0  # Dirichlet parameter (topic--term associations)
+        self.numstats      = 0    # size of statistics
+        self.thin_interval = 20   # sampling lag (?)
+        self.burn_in       = 100  # burn-in period
+        self.iterations    = 1000 # max iterations
+        self.sample_lag    = 10   # sample lag (if -1 only one sample taken)
+        self.out_file      = "model"
+        self.dispcol       = 0    # 
+        self.theta_sum     = []   # cumulative statistics of theta 
+        self.phi_sum       = []   # cumulative statistics of phi   
+        self.resource_pool = LDAResourcePool()     # only for resouce pooling for traning
+        self.new_resource_pool = LDAResourcePool() # only for resouce pooling for inference
+
+    def load_examples(self, input_file):
+        examples = []
+        for line in open(input_file, 'r'):
+            examples.append(Example(line))
+
+        return examples
+        
+    def report_theta(self):
+        theta = [[0 for j in range(self.num_of_topics) ] for i in range(len(self.resource_pool.examples)) ]
+        if self.sample_lag > 0:
+            for m in range(len(self.resource_pool.examples)):
+                for k in range(self.num_of_topics):
+                    #print "theta_sum[",m,"][",k,"]=",self.theta_sum[m][k]
+                    theta[m][k] = self.theta_sum[m][k] / self.numstats
+        else:
+            for m in range(len(self.resource_pool.examples)):
+                for k in range(self.num_of_topics):
+                    theta[m][k] = (self.resource_pool.nd_topics[m][k] + self.alpha) / (self.resource_pool.nd_sum[m] + self.num_of_topics * self.alpha);
+
+        return theta
+
+    def report_phi(self):
+        phi = [[0 for j in range(self.resource_pool.num_of_words) ] for i in range(self.num_of_topics) ]
+        if self.sample_lag > 0:
+            for k in range(self.num_of_topics):
+                for w in range(self.resource_pool.num_of_words):
+                    phi[k][w] = self.phi_sum[k][w] / self.numstats;
+        else:
+            for k in range(self.num_of_topics):
+                for w in range(self.resource_pool.num_of_words):
+                    phi[k][w] = (self.resource_pool.nword_topics[w][k] + self.beta) / (self.resource_pool.nw_sum[k] + self.resource_pool.num_of_words * self.beta)
+        return phi
+
+    def inference(self, input_file):
+        self.configure(1000, 100, 10, 2, 0.5)
+        self.load_model(input_file)
+        for inf_liter in range(2000):
+            for m in range(len(self.new_resource_pool.examples)):
+                for n in range(len(self.new_resource_pool.examples[m])):
+                    #(newz_i = newz[m][n])
+                    # sample from p(z_i|z_-i, w)
+                    self.new_word_topics[m][n] = self.inf_sampling(m, n)
+                    
+        print self.compute_newtheta()
+        #self.compute_newphi()
+        #inf_liter--;
+
+    def compute_newtheta(self):
+        new_theta = [[0 for i in range(self.num_of_topics) ] for i in range(len(self.new_resource_pool.examples)) ]        
+        for m in range(len(self.new_resource_pool.examples)):
+            for k in range(self.num_of_topics):
+                new_theta[m][k] = (self.new_resource_pool.nd_topics[m][k] + self.alpha) / (self.new_resource_pool.nd_sum[m] + self.num_of_topics * self.alpha)
+        return new_theta
+
+            
+    def inf_sampling(self, m, n):
+        topic = self.new_word_topics[m][n]
+        w  = self.new_resource_pool.examples[m][n]
+        self.new_resource_pool.nword_topics[w][topic] -= 1
+        self.new_resource_pool.nd_topics[m][topic] -=1
+        self.new_resource_pool.nw_sum[topic]       -=1
+        self.new_resource_pool.nd_sum[m]           -=1        
+        
+        Vbeta  = self.resource_pool.num_of_words * self.beta;
+        Kalpha = self.num_of_topics * self.alpha;
+
+        # do multinomial sampling via cumulative method  
+        p = [0 for i in range(self.num_of_topics) ]
+        for k in range(self.num_of_topics): 
+            p[k] = float((self.resource_pool.nword_topics[w][k] + self.new_resource_pool.nword_topics[w][k] + self.beta)) / (self.resource_pool.nw_sum[k] + self.new_resource_pool.nw_sum[k] + Vbeta) *  (self.new_resource_pool.nd_topics[m][k] + self.alpha) / (self.new_resource_pool.nd_sum[m] + Kalpha);
+        
+        # cumulate multinomial parameter
+        for k in range(1,len(p)):
+            p[k] += p[k-1]
+
+        # scaled sample because of unnormalised p[]
+        u = random.random() * p[self.num_of_topics - 1]
+        for topic in range(self.num_of_topics):
+            if u < p[topic]:
+                break
+
+        # add newly estimated z_i to count variables        
+        self.new_resource_pool.nword_topics[w][topic] +=1
+        self.new_resource_pool.nd_topics[m][topic] +=1
+        self.new_resource_pool.nw_sum[topic]       +=1
+        self.new_resource_pool.nd_sum[m]           +=1
+        
+        return topic
+        
+    def load_model(self, input_file):
+
+        # load global settings
+        for m, line in enumerate(open(self.out_file+'.global', 'r')):
+            tag, val = line[:-1].split(":")
+            if tag == "number of topic":
+                self.num_of_topics = int(val)
+            elif tag == "number of words":
+                self.resource_pool.num_of_words  = int(val)
+            elif tag == "number of documents":
+                self.resource_pool.num_of_docs  = int(val) 
+            elif tag == "alpha":
+                self.alpha  = float(val) 
+            elif tag == "beta":
+                self.beta   = float(val)           
+
+        # load trained examples 
+        self.resource_pool.word_topics = [0 for i in range(self.resource_pool.num_of_docs)]
+        for m, line in enumerate(open(self.out_file+'.examples', 'r')):
+            rows  = line[:-2].split(" ")
+            self.resource_pool.word_topics[m] = [0 for i in range(len(rows))]
+            self.resource_pool.examples.append(LearnedExample(len(rows)))
+            for n, r in enumerate(rows):
+                w, t =  r.split(":")
+                self.resource_pool.word_topics[m][n] = int(t)
+                self.resource_pool.examples[m][n]    = int(w)
+                
+        # init nword_topic
+        self.resource_pool.nword_topics = [[0 for j in range(self.num_of_topics) ] for i in range(self.resource_pool.num_of_words) ]
+        # init nd_topics
+        self.resource_pool.nd_topics = [[0 for j in range(self.num_of_topics) ] for i in range(self.resource_pool.num_of_docs) ]
+        # init nw_sum
+        self.resource_pool.nw_sum  =  [0 for i in range(self.num_of_topics) ]
+        # init nd_sum
+        self.resource_pool.nd_sum  =  [0 for i in range(self.resource_pool.num_of_docs) ]
+        
+        for m in range(self.resource_pool.num_of_docs):
+            for n in range(len(self.resource_pool.examples[m])):
+                topic = self.resource_pool.word_topics[m][n]
+                # number of instances of word i assigned to topic j
+                self.resource_pool.nword_topics[self.resource_pool.examples[m][n]][topic] += 1
+                # number of words in document i assigned to topic j
+                self.resource_pool.nd_topics[m][topic] += 1
+                # total number of words assigned to topic j                
+                self.resource_pool.nw_sum[topic] += 1        
+            self.resource_pool.nd_sum[m] += len(self.resource_pool.examples[m])
+
+        # read new (testing) data for inference
+        self.new_resource_pool.examples     = self.load_examples(input_file) 
+        self.new_resource_pool.nword_topics = [[0 for j in range(self.num_of_topics) ] for i in range(self.resource_pool.num_of_words) ] # ==new_nw==
+        self.new_resource_pool.nd_topics    = [[0 for j in range(self.num_of_topics) ] for i in range(len(self.new_resource_pool.examples)) ] # ==new_nd==
+        self.new_resource_pool.nw_sum       = [0 for i in range(self.num_of_topics) ]
+        self.new_resource_pool.nd_sum       = [0 for i in range(len(self.new_resource_pool.examples)) ]
+        self.new_word_topics  = [0 for i in range(len(self.new_resource_pool.examples))]
+
+        for m in range(len(self.new_resource_pool.examples)):
+            self.new_word_topics[m] = [0 for i in range(len(self.new_resource_pool.examples[m]))]
+            for n in range(len(self.new_resource_pool.examples[m])):
+                w = self.new_resource_pool.examples[m][n]
+                topic = int(random.random() / self.num_of_topics)
+                self.new_word_topics[m][n] = topic   # new_z
+                self.new_resource_pool.nword_topics[w][topic] += 1 # new_nw
+                self.new_resource_pool.nd_topics[m][topic] += 1    # new_nd
+                self.new_resource_pool.nw_sum[topic] += 1
+            self.new_resource_pool.nd_sum[m] = len(self.new_resource_pool.examples[m])
+                
+    def return_max_word_id(self):
+        max_id = 0
+        for m in range(len(self.resource_pool.examples)):
+            for n in range(len(self.resource_pool.examples[m])):
+                if max_id < self.resource_pool.examples[m][n]:
+                    max_id = self.resource_pool.examples[m][n]
+        return  max_id + 1 #
+
+    def estimate(self, input_file, num_of_topics, beta):
+        self.alpha = num_of_topics
+        self.num_of_topics = num_of_topics
+        self.beta  = num_of_topics
+        self.resource_pool.examples = self.load_examples(input_file)         
+        self.resource_pool.num_of_words = self.return_max_word_id()
+
+        # init parameters
+        if self.sample_lag > 0:
+            self.theta_sum  = [[0.0 for j in range(self.num_of_topics) ] for i in range(len(self.resource_pool.examples)) ]
+            self.phi_sum    = [[0.0 for j in range(self.resource_pool.num_of_words) ]  for i in range(self.num_of_topics) ]
+            self.numstats = 0;
+
+        # init markov chain        
+        self.init_state()        
+        self.configure(10000, 100, 10, 2, 0.5)
+        self.gibbs()
+        print self.report_theta()
+        self.save_models()
+
+    def save_models(self):
+        # save theta
+        f     = open(self.out_file+'.theta' , 'w')
+        theta = self.report_theta()
+        for th in theta:
+            for th_z in th:
+                f.writelines(str(th_z)+" ")
+            f.writelines("\n")
+        f.close()
+        # save phi
+        f   = open(self.out_file+'.phi' , 'w')
+        phi = self.report_phi()
+        for p in phi:
+            for p_w in p:
+                f.writelines(str(p_w)+" ")        
+            f.writelines("\n")
+        f.close()
+
+        # save word_topics
+        f = open(self.out_file+'.examples' , 'w')
+        for m in range(len(self.resource_pool.word_topics)):
+            for n in range(len(self.resource_pool.word_topics[m])):
+                f.writelines(str(self.resource_pool.examples[m][n]) + ":" + str(self.resource_pool.word_topics[m][n]) + " ")
+            f.writelines("\n")
+        f.close
+
+        # save global settings
+        f = open(self.out_file+'.global' , 'w')
+        f.writelines("number of topic:" + str(self.num_of_topics) + "\n")
+        f.writelines("number of words:" + str(self.resource_pool.num_of_words)  + "\n")
+        f.writelines("number of documents:" + str(len(self.resource_pool.examples))  + "\n")
+        f.writelines("alpha:" + str(self.alpha)  + "\n")
+        f.writelines("beta:" + str(self.beta)  + "\n")        
+        f.close
+        
+    def configure(self, iterations, burnin, thininterval, alpha=3, beta=0.5):
+        self.alpha = alpha
+        self.num_of_topics = alpha
+        self.beta = beta 
+        self.iterations = iterations
+        self.burn_in  = burnin
+        
+
+    def gibbs(self):
+        # run
+        for i in range(self.iterations):
+            for m in range(self.num_of_topics):
+                for n in range(len(self.resource_pool.word_topics[m])):
+                    # sample the topic for the word in m-th document at n-th position
+                    self.resource_pool.word_topics[m][n] = self.sampleFullConditional(m, n) 
+
+            if (i < self.burn_in)  and  (i % self.thin_interval == 0):
+                self.dispcol += 1
+
+            # get statistics after burn-in
+            if ((i > self.burn_in)  and  (self.sample_lag > 0)  and  (i % self.sample_lag == 0)):
+                self.update_parameters()
+                if (i % self.thin_interval != 0):
+                    self.dispcol += 1
+
+            #  display progress
+            if ((i > self.burn_in) and (i % self.thin_interval == 0)):
+                self.dispcol+=1
+
+            if (self.dispcol >= 100):
+                self.dispcol = 0
+
+    def update_parameters(self):
+        for m in range(len(self.resource_pool.examples)):
+            for k in range(self.num_of_topics):
+                self.theta_sum[m][k] += float(self.resource_pool.nd_topics[m][k] + self.alpha) / (self.resource_pool.nd_sum[m] + self.num_of_topics * self.alpha)
+        
+        for k in range(self.num_of_topics):
+            for v in range(self.resource_pool.num_of_words):
+               self.phi_sum[k][v] += float(self.resource_pool.nword_topics[v][k] + self.beta) / (self.resource_pool.nw_sum[k] + self.resource_pool.num_of_words * self.beta)
+
+        self.numstats +=1
+
+    def sampleFullConditional(self, m, n):
+        # remove z_i from the count variables
+        topic = self.resource_pool.word_topics[m][n]
+        self.resource_pool.nword_topics[self.resource_pool.examples[m][n]][topic] -= 1
+        self.resource_pool.nd_topics[m][topic] -=1
+        self.resource_pool.nw_sum[topic]       -=1
+        self.resource_pool.nd_sum[m]          -=1
+
+        # do multinomial sampling via cumulative method:
+        p = [0 for i in range(self.num_of_topics) ]
+        for k in range(self.num_of_topics):
+            p[k] = (self.resource_pool.nword_topics[self.resource_pool.examples[m][n]][k] + self.beta) / (self.resource_pool.nw_sum[k] + self.resource_pool.num_of_words * self.beta) * (self.resource_pool.nd_topics[m][k] + self.alpha) / (self.resource_pool.nd_sum[m] + self.num_of_topics * self.alpha)
+        
+        # cumulate multinomial parameters
+        for k in range(1,len(p)):
+            p[k] += p[k-1]
+
+        # scaled sample because of unnormalised p[]
+        u = random.random() * p[self.num_of_topics - 1]
+        for topic in range(self.num_of_topics):
+            if u < p[topic]:
+                break
+
+        # add newly estimated z_i to count variables
+        self.resource_pool.nword_topics[self.resource_pool.examples[m][n]][topic]+=1
+        self.resource_pool.nd_topics[m][topic] +=1
+        self.resource_pool.nw_sum[topic]       +=1
+        self.resource_pool.nd_sum[m]           +=1
+        return topic
+
+    def init_state(self):
+        i = 0
+        M = len(self.resource_pool.examples)
+        self.resource_pool.nword_topics = [[0 for j in range(self.num_of_topics) ] for i in range(self.resource_pool.num_of_words) ]
+        self.resource_pool.nd_topics    = [[0 for j in range(self.num_of_topics) ] for i in range(M) ]
+        self.resource_pool.nw_sum  =  [0 for i in range(self.num_of_topics) ]
+        self.resource_pool.nd_sum  =  [0 for i in range(M) ]
+
+        # The self.resource_pool.word_topics[i] are are initialised to values in [1,K] to determine the
+        # initial state of the Markov chain.
+        self.resource_pool.word_topics = [0 for i in range(M)]
+        for m in range(M):
+            N = len(self.resource_pool.examples[m])
+            self.resource_pool.word_topics[m] = [0 for i in range(N) ]
+            for n in range(N):
+                topic = int(random.random() * self.num_of_topics) # ~Mult(1/K)
+                self.resource_pool.word_topics[m][n] = topic # z_m_n
+                # number of instances of word i assigned to topic j 
+                self.resource_pool.nword_topics[self.resource_pool.examples[m][n]][topic] +=1 # (==nw==) word*topic += 1
+                # number of words in document i assigned to topic j
+                self.resource_pool.nd_topics[m][topic] +=1  # (==nd==) document*topic += 1
+                # total number of words assigned to topic j.            
+                self.resource_pool.nw_sum[topic] +=1  # (==nwsum==) 
+                self.resource_pool.nd_sum[m]     = N  # (==ndsum==)
+
+    def get_theta(self):
+        theta = [[0 for i in range(len(self.resource_pool.examples)) ] for i in range(self.num_of_topics) ]
+        if self.sample_lag > 0:
+            for m in range(len(self.resource_pool.examples)):
+                for k in self.num_of_topics:
+                    theta[m][k] = self.theta_sum[m][k] / self.numstats
+        else:
+            for m in range(len(self.resource_pool.examples)):
+                for k in self.num_of_topics:
+                    theta[m][k] = (self.resource_pool.nd_topics[m][k] + self.alpha) / (self.resource_pool.nd_sum[m] + self.num_of_topics * self.alpha)
+
+        return theta
+
+class Example:
+
+    def __init__(self, line):
+        self.features = []
+        rows  = line[:-1].split(" ")
+        self.features = [0 for i in range(len(rows)) ]
+        for i,v in enumerate(rows):
+            self.features[i]  = int(v)
+            
+    def __getitem__ (self, id):
+        return self.features[id]
+
+    def __len__(self):
+        return len(self.features)
+
+    def __str__(self):
+        return self.features
+
+class LearnedExample(Example):
+
+    def __init__(self, len):
+        self.features = [0 for j in range(len) ]
+        
+    def __setitem__ (self, id, v):
+        self.features[id] = int(v)
+
+if __name__ == '__main__':
+    try:
+        optlist, args = getopt.getopt(sys.argv[1:], "ei", longopts=["estimation", "inference"])
+    except getopt.GetoptError:
+        sys.exit(0)
+    
+    target = 'e'
+    for opt, args in optlist:
+        if opt in ("-e", "--estimation"):
+            target = 'e'
+        if opt in ("-i", "--inference"):
+            target = 'i'
+
+    if target == 'e':
+        print "run estimation"
+        lda = LDA()
+        lda.estimate('train', 2, 0.5)
+    elif target == 'i':
+        print "run inference"
+        lda = LDA()
+        lda.inference('test')
+    else:
+        print "irregular setting"
